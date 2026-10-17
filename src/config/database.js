@@ -20,3 +20,10 @@ export async function connectDatabase() {
     throw error;
   }
 }
+
+export async function disconnectDatabase() {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.disconnect();
+    console.log("MongoDB disconnected successfully");
+  }
+}

@@ -1,6 +1,6 @@
 import "dotenv/config";
 import app from "./app.js";
-import { connectDatabase } from "./config/database.js";
+import { connectDatabase,  disconnectDatabase } from "./config/database.js";
 import { closeRedisConnection } from "./config/queue.js";
 import { closeTransactionQueue } from "./queues/transaction.queue.js";
 
@@ -33,7 +33,8 @@ async function shutdown(signal) {
 
   await Promise.allSettled([
     closeTransactionQueue(),
-    closeRedisConnection()
+    closeRedisConnection(),
+    disconnectDatabase()
   ]);
 
   process.exit(0);
