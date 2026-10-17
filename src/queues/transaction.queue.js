@@ -16,7 +16,6 @@ export function getTransactionQueue() {
           type: "exponential",
           delay: Number.parseInt(process.env.JOB_BACKOFF_MS || "2000", 10)
         },
-        // Keep enough history for troubleshooting without growing Redis forever.
         removeOnComplete: { age: 24 * 60 * 60, count: 10000 },
         removeOnFail: { age: 7 * 24 * 60 * 60, count: 10000 }
       }
@@ -28,14 +27,21 @@ export function getTransactionQueue() {
 
 export async function enqueueTransaction(transactionId) {
   const queue = getTransactionQueue();
-
   const safeId = Buffer.from(transactionId).toString("base64url");
 
-  return queue.add(
-    "process-transaction",
-    { transactionId },
-    { jobId: `transaction-${safeId}` }
-  );
+  // Don't wait indefinitely if Redis is unavailable.
+  return Promise.race([
+    queue.add(
+      "process-transaction",
+      { transactionId },
+      { jobId: `transaction-${safeId}` }
+    ),
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error("Redis queue operation timed out"));
+      }, 2000);
+    })
+  ]);
 }
 
 export async function closeTransactionQueue() {

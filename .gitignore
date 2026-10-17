@@ -7,3 +7,4 @@ coverage/
 .DS_Store
 npm-debug.log*
 *.log
+transaction-webhook-testing-guide.md
