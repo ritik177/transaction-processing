@@ -8,3 +8,4 @@ coverage/
 npm-debug.log*
 *.log
 transaction-webhook-testing-guide.md
+aws_ec2_transaction_webhook_deployment_guide.md
