@@ -139,11 +139,68 @@ The API listens on `http://localhost:3000` by default.
 | `JOB_ATTEMPTS` | Maximum queue attempts | `3` |
 | `JOB_BACKOFF_MS` | Initial exponential retry delay in milliseconds | `2000` |
 
-## API reference
+## API Reference
 
-The examples below use the local base URL. To test the live deployment, replace `http://localhost:3000` with `http://52.66.240.197`.
+The service exposes the following endpoints.
 
-### 1. Health check
+| Method | Endpoint | Description | Success Response |
+|---|---|---|---|
+| `GET` | `/` | Checks API health | `200 OK` |
+| `POST` | `/v1/webhooks/transactions` | Accepts a transaction webhook for asynchronous processing | `202 Accepted` |
+| `GET` | `/v1/transactions/:transaction_id` | Retrieves the current status of a transaction | `200 OK` |
+
+### Webhook Payload
+
+The `POST /v1/webhooks/transactions` endpoint accepts a JSON payload:
+
+```json
+{
+  "transaction_id": "txn_abc123def456",
+  "source_account": "acc_user_789",
+  "destination_account": "acc_merchant_456",
+  "amount": 1500,
+  "currency": "INR"
+}
+```
+
+### Response and Error Codes
+
+- `200 OK` — Health check or successful transaction lookup.
+- `202 Accepted` — Webhook accepted or duplicate webhook acknowledged.
+- `400 Bad Request` — Invalid webhook payload.
+- `404 Not Found` — Transaction does not exist.
+- `503 Service Unavailable` — Queue scheduling fails.
+
+For request examples and step-by-step verification, see [Testing and Verification](#testing-and-verification).
+
+## Testing and Verification
+
+This section explains how to test the Transaction Webhook Service locally and verify the live AWS EC2 deployment.
+
+### Test Environments
+
+Choose the appropriate base URL for your environment.
+
+| Environment | Base URL |
+|---|---|
+| Local | `http://localhost:3000` |
+| AWS EC2 Live | `http://52.66.240.197` |
+
+The live deployment is currently accessible over HTTP, not HTTPS.
+
+### Prerequisites
+
+For local testing:
+
+- Start MongoDB and Redis, or configure dedicated managed instances.
+- Start the API using `npm run dev`.
+- Start the background worker in a separate terminal using `npm run dev:worker`.
+
+For AWS live testing, use the deployed public API endpoint. The API and background worker are configured to run on the EC2 instance, allowing transactions to be accepted and processed asynchronously.
+
+### 1. Health Check
+
+Verify that the API is reachable and responding successfully.
 
 **Request**
 
@@ -151,22 +208,34 @@ The examples below use the local base URL. To test the live deployment, replace 
 GET /
 ```
 
+**Local command**
+
 ```bash
 curl -i http://localhost:3000/
 ```
 
-**Example response**
+**AWS live command**
+
+```bash
+curl -i http://52.66.240.197/
+```
+
+**Expected response: HTTP `200 OK`**
 
 ```json
 {
   "status": "HEALTHY",
-  "current_time": "2026-10-15T14:00:00.000Z"
+  "current_time": "2026-10-17T18:04:53.636Z"
 }
 ```
 
-The timestamp is an example and will vary for each request.
+The timestamp above is an example. The actual value changes with each request.
 
-### 2. Submit a transaction webhook
+**Verification:** The public API responds with HTTP `200 OK` and reports a healthy status.
+
+### 2. Submit a Transaction Webhook
+
+Submit a valid transaction payload to the webhook endpoint.
 
 **Request**
 
@@ -175,55 +244,234 @@ POST /v1/webhooks/transactions
 Content-Type: application/json
 ```
 
+**Local command**
+
 ```bash
 curl -i -X POST http://localhost:3000/v1/webhooks/transactions \
   -H "Content-Type: application/json" \
   -d '{
-    "transaction_id": "txn_abc123def456",
-    "source_account": "acc_user_789",
-    "destination_account": "acc_merchant_456",
+    "transaction_id": "txn_test_001",
+    "source_account": "acc_a",
+    "destination_account": "acc_b",
     "amount": 1500,
     "currency": "INR"
   }'
 ```
 
-**Example successful response — HTTP `202 Accepted`**
+**AWS live command**
+
+```bash
+curl -i -X POST http://52.66.240.197/v1/webhooks/transactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transaction_id": "txn_live_test_001",
+    "source_account": "acc_a",
+    "destination_account": "acc_b",
+    "amount": 1500,
+    "currency": "INR"
+  }'
+```
+
+**Expected response: HTTP `202 Accepted`**
 
 ```json
 {
   "message": "Webhook accepted",
-  "transaction_id": "txn_abc123def456",
+  "transaction_id": "txn_live_test_001",
   "status": "PROCESSING"
 }
 ```
 
-A repeated delivery of a transaction that is still processing should not create another transaction record or another deterministic queue job. Invalid payloads return `400 Bad Request`. If queue scheduling fails, the API returns `503 Service Unavailable`, allowing the sender to retry; the existing database record is retained so a subsequent delivery can attempt to enqueue it again.
+The transaction ID in the response matches the ID supplied in the request. The transaction is accepted for asynchronous processing rather than being processed synchronously.
 
-### 3. Get transaction status
+**Verification:** The API returns HTTP `202 Accepted` and acknowledges the transaction.
 
-**Request**
+### 3. Check the Initial Transaction Status
 
-```http
-GET /v1/transactions/:transaction_id
-```
+Retrieve the transaction using the ID supplied in the webhook request.
+
+**Local command**
 
 ```bash
-curl -i http://localhost:3000/v1/transactions/txn_abc123def456
+curl -i http://localhost:3000/v1/transactions/txn_test_001
 ```
 
-Initially, the status is expected to be `PROCESSING` and `processed_at` is `null`. After the configured delay, the status should normally become `PROCESSED` and `processed_at` should be populated. Unknown transaction IDs return `404 Not Found`.
+**AWS live command**
 
-Possible statuses:
+```bash
+curl -i http://52.66.240.197/v1/transactions/txn_live_test_001
+```
 
-- `PROCESSING` — accepted and awaiting completion.
-- `PROCESSED` — processing completed successfully.
-- `FAILED` — all configured job attempts failed; investigate and recover as appropriate.
+**Expected response: HTTP `200 OK`**
+
+```json
+[
+  {
+    "transaction_id": "txn_live_test_001",
+    "source_account": "acc_a",
+    "destination_account": "acc_b",
+    "amount": 1500,
+    "currency": "INR",
+    "status": "PROCESSING",
+    "created_at": "2026-10-17T18:05:23.252Z",
+    "processed_at": null
+  }
+]
+```
+
+This is an illustrative response. The actual timestamps and transaction ID depend on your request.
+
+**Verification:** The transaction can be retrieved from persistent storage and initially has the `PROCESSING` status.
+
+### 4. Verify Background Processing
+
+The background worker processes the transaction after the configured delay, which defaults to 30 seconds.
+
+Wait approximately 30–35 seconds, then run the status request again.
+
+**AWS live command**
+
+```bash
+curl -i http://52.66.240.197/v1/transactions/txn_live_test_001
+```
+
+**Local command**
+
+```bash
+curl -i http://localhost:3000/v1/transactions/txn_test_001
+```
+
+**Expected response: HTTP `200 OK`**
+
+```json
+[
+  {
+    "transaction_id": "txn_live_test_001",
+    "source_account": "acc_a",
+    "destination_account": "acc_b",
+    "amount": 1500,
+    "currency": "INR",
+    "status": "PROCESSED",
+    "created_at": "2026-10-17T18:05:23.252Z",
+    "processed_at": "2026-10-17T18:05:53.304Z"
+  }
+]
+```
+
+The timestamps are illustrative; `processed_at` should be populated after successful processing.
+
+**Verification:** The status changes from `PROCESSING` to `PROCESSED` after approximately 30 seconds.
+
+### 5. Test Duplicate Webhook Delivery
+
+Submit the same transaction payload again using an existing transaction ID that has already been processed.
+
+**AWS live command**
+
+```bash
+curl -i -X POST http://52.66.240.197/v1/webhooks/transactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transaction_id": "txn_live_test_001",
+    "source_account": "acc_a",
+    "destination_account": "acc_b",
+    "amount": 1500,
+    "currency": "INR"
+  }'
+```
+
+For local testing, replace the base URL with `http://localhost:3000` and use the local transaction ID.
+
+**Observed response: HTTP `202 Accepted`**
+
+```json
+{
+  "message": "Webhook already processed",
+  "transaction_id": "txn_live_test_001",
+  "status": "PROCESSED"
+}
+```
+
+Check the transaction status again to confirm it remains `PROCESSED` and its original timestamps remain unchanged.
+
+**Verification:** The duplicate delivery is acknowledged without creating another transaction record or reprocessing the completed transaction.
+
+### 6. Test Invalid Payload Validation
+
+Send a webhook without the required `transaction_id` field.
+
+**AWS live command**
+
+```bash
+curl -i -X POST http://52.66.240.197/v1/webhooks/transactions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_account": "acc_a",
+    "destination_account": "acc_b",
+    "amount": 1500,
+    "currency": "INR"
+  }'
+```
+
+**Expected response: HTTP `400 Bad Request`**
+
+```json
+{
+  "error": "transaction_id must be a non-empty string"
+}
+```
+
+For local testing, use the same request with `http://localhost:3000`.
+
+**Verification:** The API rejects the invalid payload and returns an appropriate validation error.
+
+### 7. Test an Unknown Transaction ID
+
+Request a transaction ID that does not exist in the database.
+
+**AWS live command**
+
+```bash
+curl -i http://52.66.240.197/v1/transactions/txn_does_not_exist_999
+```
+
+**Local command**
+
+```bash
+curl -i http://localhost:3000/v1/transactions/txn_does_not_exist_999
+```
+
+**Expected response: HTTP `404 Not Found`**
+
+```json
+{
+  "error": "Transaction not found"
+}
+```
+
+**Verification:** The API returns HTTP `404 Not Found` when the requested transaction does not exist.
+
+### Production Verification Results
+
+The following functional checks were manually verified against the live AWS deployment.
+
+| Test | Result | Verified behavior |
+|---|---|---|
+| 1. Health check | PASS | Public API responds with HTTP `200 OK` |
+| 2. Submit webhook | PASS | Returns HTTP `202 Accepted` |
+| 3. Initial status | PASS | Transaction can be retrieved |
+| 4. Background processing | PASS | Status changes to `PROCESSED` after approximately 30 seconds |
+| 5. Duplicate webhook | PASS | Completed transaction is acknowledged without reprocessing |
+| 6. Invalid payload | PASS | Returns HTTP `400 Bad Request` |
+| 7. Unknown transaction | PASS | Returns HTTP `404 Not Found` |
+
+**Note:** These results represent the manual checks performed against the live deployment. They do not imply that load testing, concurrency testing, or simulated queue failures have also been completed.
 
 ## Test with Postman
 
-Postman is a convenient way to manually inspect request payloads, HTTP status codes, and JSON responses. The `curl` examples above are also provided for quick terminal-based checks.
+Postman can be used to inspect request payloads, HTTP status codes, and JSON responses. The `curl` commands in the Testing and Verification section provide an alternative for terminal-based testing.
 
-Create a Postman collection named **Transaction Webhook Service** and add these requests:
+Create a Postman collection named **Transaction Webhook Service** and add the following requests:
 
 | Request | Method | URL (local) |
 |---|---|---|
@@ -234,49 +482,49 @@ Create a Postman collection named **Transaction Webhook Service** and add these 
 For the POST request:
 
 1. Select **Body → raw → JSON**.
-2. Paste the webhook payload from the API reference above.
-3. Send the request and verify the response is `202 Accepted`.
-4. Send the same payload again to test duplicate delivery.
-5. Query the status endpoint immediately, then query it again after the configured processing delay.
+2. Paste the webhook payload from the API Reference section.
+3. Send the request and verify that the API returns `202 Accepted`.
+4. Send the same payload again using the same transaction ID to test duplicate delivery.
+5. Query the transaction status immediately, then query it again after the configured processing delay.
 
-For live testing, replace `http://localhost:3000` with `http://52.66.240.197`. Use unique transaction IDs for new test transactions. A Postman collection can be added to the repository if one is created; do not assume a collection is included unless the file is actually committed.
+For live testing, replace `http://localhost:3000` with `http://52.66.240.197`. Use unique transaction IDs for new transactions to avoid conflicts with existing test data.
 
-## Testing checklist
+For detailed request examples, expected responses, and verified test results, refer to the [Testing and Verification](#testing-and-verification) section.
 
-Run these checks in a local environment or against the deployed API where appropriate.
+## Automated Tests
 
-| Scenario | Expected result |
-|---|---|
-| Health check | HTTP `200 OK` |
-| Valid webhook | HTTP `202 Accepted`; status is initially `PROCESSING` |
-| Invalid or missing required fields | HTTP `400 Bad Request` |
-| Duplicate webhook delivery | No duplicate transaction record; no duplicate active deterministic job |
-| Existing transaction status lookup | HTTP `200 OK` with current transaction status |
-| Unknown transaction ID | HTTP `404 Not Found` |
-| Background processing | Status changes to `PROCESSED` after the configured delay when processing succeeds |
-| Queue scheduling failure | HTTP `503 Service Unavailable`, so the sender can retry |
+The project uses Node.js's built-in test runner (`node:test`) and Supertest to test the API.
 
-The expected results above describe the intended behavior; verify each scenario in your environment before reporting it as tested. Queue scheduling failure may require explicitly simulating a Redis or queue error.
-
-## Automated tests
-
-The integration tests use the configured MongoDB and Redis instances. They may create and delete test data, so use a **dedicated test database and Redis instance**, not production resources.
-
-Run the default test command:
+### Run the Default Test Suite
 
 ```bash
 npm test
 ```
 
-Integration tests are skipped unless `RUN_INTEGRATION_TESTS=true`. To enable them:
+### Run Integration Tests
+
+Integration tests are skipped by default. To enable them, run:
 
 ```bash
-RUN_INTEGRATION_TESTS=true npm run test:integration
+npm run test:integration
 ```
 
-The integration test asserts that the webhook response takes less than 500 ms. Results can vary on shared or resource-constrained environments, so investigate failures rather than assuming they always indicate a code defect.
+The integration tests use the configured MongoDB and Redis instances to verify transaction webhook behavior.
 
-**Important:** Do not run destructive integration tests against the live production database or Redis instance. Use isolated test resources.
+**Important:** Integration tests may create or delete test data. Configure a dedicated test database and Redis instance before running them. Do not run destructive integration tests against production resources.
+
+### Response Time Verification
+
+The webhook endpoint was manually tested locally against the 500 ms response-time target.
+
+| Metric | Result |
+|---|---|
+| HTTP status | `202 Accepted` |
+| Measured response time | `0.134543 seconds` (approximately 134.5 ms) |
+| Target | Less than 500 ms |
+| Result | PASS |
+
+Response time may vary depending on the machine, database, and environment.
 
 ## AWS EC2 deployment
 
@@ -293,50 +541,40 @@ The API and worker are separate processes. The worker is not an HTTP service and
 
 ### Verify the deployment
 
-Health check from the public URL:
+Use the [Testing and Verification](#testing-and-verification) section to verify the live API, webhook submission, transaction status, duplicate delivery, payload validation, and background processing.
 
-```bash
-curl -i http://52.66.240.197/
-```
+The deployed API is available at:
 
-Submit a test webhook:
+http://52.66.240.197/
 
-```bash
-curl -i -X POST http://52.66.240.197/v1/webhooks/transactions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "transaction_id": "txn_live_test_001",
-    "source_account": "acc_a",
-    "destination_account": "acc_b",
-    "amount": 1500,
-    "currency": "INR"
-  }'
-```
+### Deployment and Security Notes
 
-Check the transaction status:
+- Never commit `.env` files, database credentials, Redis credentials, or private SSH keys to version control.
+- Keep the Node.js application port and Redis port private. Route public HTTP traffic through Nginx.
+- The current live endpoint uses HTTP rather than HTTPS. HTTPS can be configured using a domain name and a TLS certificate.
+- Pushing changes to GitHub does not automatically update the EC2 deployment unless CI/CD is configured. For manual deployments, pull the latest code on EC2, install dependencies if needed, restart the API and worker services, and verify the health endpoint and service logs.
 
-```bash
-curl -i http://52.66.240.197/v1/transactions/txn_live_test_001
-```
+## Reliability Notes and Limitations
 
-Query the status again after the configured processing delay.
+- A unique MongoDB index on `transaction_id` prevents duplicate transaction records, including during concurrent insert attempts.
+- Deterministic BullMQ job IDs help prevent duplicate job creation while the corresponding job remains in Redis. They do not guarantee permanent deduplication if jobs are removed.
+- The worker checks transaction status and uses conditional updates to avoid overwriting an already completed transaction.
+- If a transaction is saved to MongoDB but queue insertion fails, the API returns `503 Service Unavailable`. The transaction record may already exist, and restarting Redis alone does not guarantee that the job will be rescheduled.
+- MongoDB writes and Redis queue insertion are not atomic. A transactional outbox or reconciliation worker could improve recovery by identifying transactions stuck in `PROCESSING` without corresponding queue jobs and rescheduling them.
+- This assessment simulates transaction processing rather than integrating with a real payment provider. A production implementation should verify webhook signatures, authenticate senders, handle provider event IDs, use safe monetary representations such as integer minor units or `Decimal128`, and reconcile external payment states.
+- BullMQ completed and failed job retention should be configured according to operational and debugging requirements.
 
-### Deployment and security notes
+### Testing Coverage
 
-- Keep `.env`, MongoDB credentials, Redis credentials, and private SSH keys out of Git.
-- Do not expose the internal Node.js port or Redis port publicly; route HTTP traffic through Nginx.
-- The current public endpoint uses HTTP. HTTPS requires a domain and TLS configuration.
-- Pushing code to GitHub does not automatically update EC2 unless a CI/CD workflow has been configured. For manual deployment, pull the latest code on the instance, install changed dependencies if needed, restart the API and worker services, and verify service logs and health checks.
+The following scenarios were tested locally:
 
-## Reliability notes and limitations
+- Duplicate webhook handling, including five simultaneous requests using the same transaction ID.
+- MongoDB transaction uniqueness.
+- Redis unavailability and the expected `503 Service Unavailable` response.
+- Worker restart and processing of a previously queued transaction.
+- Webhook response time against the 500 ms target.
 
-- A MongoDB unique index on `transaction_id` prevents duplicate transaction records, including concurrent insert attempts.
-- Deterministic BullMQ job IDs reduce duplicate job creation while the relevant job remains in Redis. They are not a permanent deduplication mechanism if jobs are removed from Redis.
-- The worker checks transaction status before processing and uses a conditional update to avoid overwriting an already completed transaction.
-- If the database insert succeeds but queue insertion fails, the API returns `503`. A subsequent webhook delivery can attempt to enqueue the existing `PROCESSING` transaction again.
-- MongoDB writes and Redis queue insertion are not one atomic operation. For stronger recovery guarantees, production systems should implement a transactional outbox or a reconciliation worker that finds `PROCESSING` transactions without corresponding jobs and reschedules them.
-- This assessment simulates successful external processing. Real payment integrations should verify provider signatures, authenticate webhook senders, handle provider event IDs, use safe monetary representations (for example, integer minor units or Decimal128), and reconcile external payment state.
-- Completed and failed BullMQ job retention should be configured for the expected workload and operational inspection needs.
+These results demonstrate the behavior verified in the local development environment. They do not imply that every failure scenario was tested in production.
 
 ## Author
 
